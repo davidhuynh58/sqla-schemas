@@ -38,6 +38,14 @@ type_annotation_mapping_nonpostgres = {
 }
 
 class SqlaSchema(BaseModel):
+    # class variables for SQLAlchemy setup
+    db_url: ClassVar[str] = "sqlite:///default.db"
+    sqla_table: ClassVar[Optional[DeclarativeBase]] = None
+    _base: ClassVar[Optional[DeclarativeBase]] = None
+    _meta: ClassVar[Optional[MetaData]] = None
+    _engine: ClassVar[Optional[Engine]] = None
+    __table_args__: ClassVar[Optional[Union[tuple, dict]]] = None
+
     @classmethod
     def _interpret_py_annotation(cls, py_anno: type | Any, target: Literal["SQLAlchemy"] = "SQLAlchemy"):
         assert target in ["SQLAlchemy"], f"{target=} not supported"
@@ -113,19 +121,6 @@ class SqlaSchema(BaseModel):
                 print(f"{py_anno} type not supported")
                 raise
         
-    # class variables for SQLAlchemy setup
-    db_url: ClassVar[str] = "sqlite:///default.db"
-    sqla_table: ClassVar[Optional[DeclarativeBase]] = None
-    _base: ClassVar[Optional[DeclarativeBase]] = None
-    _meta: ClassVar[Optional[MetaData]] = None
-    _engine: ClassVar[Optional[Engine]] = None
-    __table_args__: ClassVar[Optional[Union[tuple, dict]]] = None
-    
-    # private attribute for table arguments
-    _table_args: list[
-        Union[ForeignKeyConstraint, UniqueConstraint, CheckConstraint, Index]
-    ] = []
-
     # method to convert results to dicts
     @classmethod
     def _results_to_dict(cls, results):
@@ -398,7 +393,7 @@ if __name__ == "__main__":
     # SCHEMA DEFINITIONS -----------------------------------------------------------------
     # define application schema class with url
     class AppSchema(SqlaSchema):
-        _db_url = "sqlite:///test.db"
+        db_url = "sqlite:///test.db"
     AppSchema.construct_base_schema()
     # AppSchema = SqlaSchema.construct_base_schema(db_url="sqlite:///test.db")
     
