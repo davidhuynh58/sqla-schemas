@@ -12,7 +12,8 @@ from sqla_schemas import SqlaSchema
 
 if __name__ == "__main__":
     class SoarSchema(SqlaSchema):
-        _url = "sqlite:///test.db"
+        db_url = "sqlite:///test.db"
+    SoarSchema.construct_base_schema()
 
     class Task(SoarSchema):
         id: Annotated[str, Field(description="task id"), Column(String, primary_key=True)]
@@ -30,8 +31,8 @@ if __name__ == "__main__":
     opportunity_01 = Opportunity(id="test_opportunity")
     opportunity_01.sqla_add()
 
-    Task.sqla_select_table()
-    task_01.sqla_select_table()
+    Task.sqla_select_table_where()
+    task_01.sqla_select_table_where()
 
-    Opportunity.sqla_select_table()
-    opportunity_01.sqla_select_table()
+    Opportunity.sqla_select_table_where()
+    opportunity_01.sqla_select_table_where()
