@@ -10,23 +10,28 @@ from sqlalchemy import (
     select, and_, or_,
 )
 from sqlalchemy.types import (
-    Boolean, Integer, BigInteger, Float, String, PickleType, NullType
+    Boolean, Integer, BigInteger, Float, String, PickleType, NullType, TIMESTAMP
 )
 from sqlalchemy.types import Enum as SQLAlchemyEnum
 from sqlalchemy.sql import base as sqlbase
 from sqlalchemy.dialects.postgresql import (JSONB, ARRAY)
 from sqlalchemy.ext.mutable import MutableDict
-from sqlalchemy.orm import sessionmaker, Session, declarative_base
+from sqlalchemy.orm import sessionmaker, Session, declarative_base, DeclarativeBase
 from sqlalchemy.exc import SQLAlchemyError
 from operator import lt, le, eq, ne, ge, gt
 import contextlib
 import inspect
 import json
+from datetime import datetime
 
 mutable_JSONB = MutableDict.as_mutable(JSONB)
 
 meta = MetaData()
 Base = declarative_base()
+
+type_annotation_mapping_postgres = {
+    datetime: TIMESTAMP(timezone=True)
+}
 
 class SqlaSchema(BaseModel):
     @classmethod
@@ -98,7 +103,8 @@ class SqlaSchema(BaseModel):
                 raise
         
     # class variables for SQLAlchemy setup
-    _db_url: ClassVar[str] = "sqlite:///my_database.db"
+    _db_url: ClassVar[str] = "sqlite:///default.db"
+    _base: ClassVar[Optional[DeclarativeBase]] = None
     _engine: ClassVar[Optional[Any]] = None
     _table: ClassVar[Optional[Any]] = None
     
@@ -128,6 +134,21 @@ class SqlaSchema(BaseModel):
             session.rollback() # Important for maintaining session integrity
             print(f"An SQLAlchemy error occurred: {e}")
             raise
+
+    # app-level method to construct base schema
+    @classmethod
+    def construct_base_schema(cls, db_url=None) -> Self:
+        # set database url
+        if db_url:
+            cls._db_url = db_url
+
+        # construct declarative base with appropriate type mapping
+        if 'postgres' in cls._db_url.lower():
+            cls._base = declarative_base(type_annotation_map=None)
+        else:
+            cls._base = declarative_base(type_annotation_map=None)
+
+        return cls
 
     # app-level method to init db 
     @classmethod
