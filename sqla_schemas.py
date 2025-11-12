@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from enum import Enum
 from typing import Annotated, Union, Optional, ClassVar, Any, Literal, Self, get_origin, get_args
 from sqlalchemy import (
@@ -9,7 +9,7 @@ from sqlalchemy import (
     select, delete, and_, or_,
 )
 from sqlalchemy.types import (
-    Boolean, Integer, BigInteger, Float, String, PickleType, NullType, TIMESTAMP, JSON,
+    Boolean, Integer, BigInteger, Float, String, PickleType, NullType, TIMESTAMP, JSON, Uuid,
 )
 from sqlalchemy.types import Enum as SQLAlchemyEnum
 from sqlalchemy.dialects.postgresql import (JSONB, ARRAY)
@@ -20,6 +20,8 @@ from sqlalchemy.sql.elements import BinaryExpression
 import contextlib
 import json
 from datetime import datetime
+import dateutil
+from uuid import UUID, uuid4
 
 mutable_JSONB = MutableDict.as_mutable(JSONB)
 
@@ -37,6 +39,36 @@ type_annotation_mapping_nonpostgres = {
     dict[str, Any]: PickleType,
 }
 
+def does_annotation_contain(anno: type | Any, type_: type | Any) -> bool:
+    # define type checking function
+    if type_ is Union:
+        # handle special case of checking for type_ = Union (not a proper type)
+        check_for_type = lambda t: t is Union
+    else:
+        # otherwise, standard check with issubclass() if arg is a type
+        check_for_type = lambda t: issubclass(t, type_) if isinstance(t, type) else False
+
+    # check for underlying types, i.e. type(py_type) = types.GenericAlias
+    # e.g. Union, Optional, list
+    underlying_types = get_args(anno)
+    type_origin = get_origin(anno)
+
+    # if annotation is type_
+    if check_for_type(anno):
+        return True
+    
+    # else if no underlying types, return False
+    elif not underlying_types:
+        return False
+    
+    # else if origin is type
+    elif check_for_type(type_origin):
+        return True
+    
+    # else check underlying types
+    else:
+        return any([does_annotation_contain(underlying_type, type_=type_) for underlying_type in underlying_types])
+    
 class SqlaSchema(BaseModel):
     # class variables for SQLAlchemy setup
     db_url: ClassVar[str] = "sqlite:///default.db"
@@ -67,6 +99,7 @@ class SqlaSchema(BaseModel):
 
                 if target == "SQLAlchemy":
                     return {'type_': cls._interpret_py_annotation(underlying_types[0])['type_'], 'nullable': isOptional}
+                
             # handle list
             elif issubclass(type_origin, list):
                 if target == "SQLAlchemy":
@@ -77,6 +110,18 @@ class SqlaSchema(BaseModel):
                     # otherwise, default to JSON
                     else:
                         return {'type_': JSON, 'nullable': False}
+                    
+            # handle dict with args
+            elif issubclass(type_origin, dict):
+                if target == "SQLAlchemy":
+                    # postgres supports mutable JSONB type
+                    if 'postgres' in cls.db_url.lower():
+                        return {'type_': mutable_JSONB, 'nullable': False}
+                    
+                    # otherwise, default to JSON
+                    else:
+                        return {'type_': JSON, 'nullable': False}
+                    
             else:
                 print(f"{py_anno} not supported, only Union/Optional and list")
                 pass
@@ -99,6 +144,16 @@ class SqlaSchema(BaseModel):
                 if target == "SQLAlchemy":
                     return {'type_': String, 'nullable': False}
                 
+            elif issubclass(py_anno, dict):
+                if target == "SQLAlchemy":
+                    # postgres supports mutable JSONB type
+                    if 'postgres' in cls.db_url.lower():
+                        return {'type_': mutable_JSONB, 'nullable': False}
+                    
+                    # otherwise, default to JSON
+                    else:
+                        return {'type_': JSON, 'nullable': False}
+                
             elif issubclass(py_anno, Enum):
                 if target == "SQLAlchemy":
                     return {'type_': SQLAlchemyEnum(py_anno), 'nullable': False}
@@ -106,6 +161,10 @@ class SqlaSchema(BaseModel):
             elif issubclass(py_anno, datetime):
                 if target == "SQLAlchemy":
                     return {'type_': TIMESTAMP(timezone=True), 'nullable': False}
+                
+            elif issubclass(py_anno, UUID):
+                if target == "SQLAlchemy":
+                    return {'type_': Uuid, 'nullable': False}
                 
             elif issubclass(py_anno, BaseModel):
                 if target == "SQLAlchemy":
@@ -157,6 +216,14 @@ class SqlaSchema(BaseModel):
         print("Creating database engine")
         cls._engine = create_engine(cls.db_url)
 
+        # specifically enable foreign key constraints for sqlite
+        if 'sqlite' in cls.db_url.lower():
+            def _fk_pragma_on_connect(dbapi_con, con_record):
+                dbapi_con.execute('pragma foreign_keys=ON')
+
+            from sqlalchemy import event
+            event.listen(cls._engine, 'connect', _fk_pragma_on_connect)
+        
         # drop all tables
         if drop_tables_first:
             print("Dropping any existing tables")
@@ -231,7 +298,7 @@ class SqlaSchema(BaseModel):
                 field_column = field_column[0]
 
                 # if column type is NullType, assume that default Column values are desired
-                # remove 'type' and 'nullable' fields from input args
+                # set 'type' and 'nullable' fields to match default Column
                 if isinstance(field_column.type, NullType):
                     field_column.type = default_column.type
                     field_column.nullable = default_column.nullable
@@ -394,12 +461,28 @@ if __name__ == "__main__":
     # define application schema class with url
     class AppSchema(SqlaSchema):
         db_url = "sqlite:///test.db"
+
+        @model_validator(mode='before')
+        @classmethod
+        def coerse_types(cls, data: Any) -> Any:
+            if isinstance(data, dict):
+
+                # iterate through schema fields for specific cases
+                for field_name, field_info in cls.__pydantic_fields__.items():
+
+                    # if datetime field given as string, convert to datetime
+                    if does_annotation_contain(field_info.annotation, datetime):
+                        if isinstance(data.get(field_name, None), str):
+                            data[field_name] = dateutil.parser.parse(data[field_name])
+
+            return data
     AppSchema.construct_base_schema()
     # AppSchema = SqlaSchema.construct_base_schema(db_url="sqlite:///test.db")
     
     # define application class, User
     class User(AppSchema):
-        id: Annotated[str, Field(description="user id"), Column(String)]
+        id: Annotated[str, Field(description="user id"), Column(unique=True)]
+        uuid: Annotated[UUID, Field(description="user uuid")]
         time: Annotated[datetime, Field(description="Timestamp when user was added")]
     User.sqla_create_table_class()
     
@@ -416,7 +499,16 @@ if __name__ == "__main__":
 
     # define application class, Resource
     class Resource(AppSchema):
-        id: Annotated[str, Field(description="resource id"), Column(unique=False)]
+        id: Annotated[str, Field(description="resource id"), Column(unique=True)]
+        user_id: Annotated[
+            str, Field(description="related user id"), 
+            Column(
+                String, 
+                # ForeignKey(column=User.sqla_table.id, ondelete='CASCADE', onupdate='CASCADE'),
+                ForeignKey(column='user.id', ondelete='CASCADE', onupdate='CASCADE'),
+                # ForeignKey(column='.'.join([User.sqla_table.__tablename__, 'id']), ondelete='CASCADE', onupdate='CASCADE'),
+            )
+        ]
         str_list: Annotated[list[str], Field(description="test list")]
         nested_model: Annotated[NestedModel, Field(description="test nested model")]
         enum_field: Color
@@ -431,26 +523,29 @@ if __name__ == "__main__":
 
     # ADD ENTRIES -----------------------------------------------------------------
     print(f"Adding entries ".ljust(pad_len, '-'))
-    user_01 = User(id="test_user_01", time=datetime.now())
-    user_02 = User(id="test_user_02", time=datetime.now())
+    user_01 = User(id="test_user_01", uuid=uuid4(), time='2025-11-12T16:15:30Z')
+    user_02 = User(id="test_user_02", uuid=uuid4(), time=datetime.now())
     user_01.sqla_add()
+    user_02.sqla_add()
 
     resource_01 = Resource(
         id="test_resource_01", str_list=['1', '2'], 
+        user_id=user_01.id,
         nested_model={'id': 'nest_01', 'value': 2.},
         enum_field=Color.RED,
         nonrequired_field=1
     )
     resource_02 = Resource(
         id="test_resource_02", str_list=['1', '2'], 
+        user_id=user_02.id,
         nested_model={'id': 'nest_02', 'value': 2.},
         enum_field=Color.BLUE,
         nonrequired_field=1
     )
 
     # test bulk add (can also be done at schema-level)
-    AppSchema.sqla_add_all([user_02, resource_01, resource_02])
-    # User.sqla_add_all([user_02, resource_01, resource_02])
+    AppSchema.sqla_add_all([resource_01, resource_02])
+    # Resource.sqla_add_all([resource_01, resource_02])
 
     # SELECT TABLE ENTRIES -----------------------------------------------------------------
     print(f"Selecting table entries ".ljust(pad_len, '-'))
@@ -474,8 +569,10 @@ if __name__ == "__main__":
 
     # DELETE ENTRIES -----------------------------------------------------------------
     print(f"Deleting entries ".ljust(pad_len, '-'))
-    User.sqla_delete_table_where(User.sqla_table.id == 'test_user_02')
+    User.sqla_delete_table_where(User.sqla_table.id == 'test_user_01')
+    # Resource.sqla_delete_table_where(Resource.sqla_table.id == 'test_resource_01')
     print(User.sqla_select_table_where())
+    print(Resource.sqla_select_table_where())
 
     # TRUNCATE TABLES -----------------------------------------------------------------
     print(f"Truncating tables ".ljust(pad_len, '-'))
@@ -488,3 +585,14 @@ if __name__ == "__main__":
     AppSchema.sqla_truncate_table()
     print(User.sqla_select_table_where())
     print(Resource.sqla_select_table_where())
+
+    # # test does_annotation_contain
+    # print(f"Testing does_annotation_contain() ".ljust(pad_len, '-'))
+    # print(f"{does_annotation_contain(str, str)=}")
+    # print(f"{does_annotation_contain(Optional[str], str)=}")
+    # print(f"{does_annotation_contain(list[str], str)=}")
+    # print(f"{does_annotation_contain(Union[float, str], str)=}")
+    # print(f"{does_annotation_contain(Union[float, str], float)=}")
+    # print(f"{does_annotation_contain(list[list[str]], str)=}")
+    # print(f"{does_annotation_contain(dict[str, Any], str)=}")
+    # print(f"{does_annotation_contain(Union[float, str], Union)=}")
