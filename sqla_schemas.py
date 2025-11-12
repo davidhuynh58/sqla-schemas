@@ -501,7 +501,7 @@ if __name__ == "__main__":
     class Resource(AppSchema):
         id: Annotated[str, Field(description="resource id"), Column(unique=True)]
         user_id: Annotated[
-            str, Field(description="related user id"), 
+            Optional[str], Field(default=None, description="related user id"), 
             Column(
                 String, 
                 # ForeignKey(column=User.sqla_table.id, ondelete='CASCADE', onupdate='CASCADE'),
